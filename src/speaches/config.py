@@ -10,10 +10,10 @@ BYTES_PER_SECOND = SAMPLES_PER_SECOND * SAMPLE_WIDTH
 # 1 SECOND OF AUDIO = 32000 BYTES = 16000 SAMPLES
 
 
-type Device = Literal["cpu", "cuda", "auto"]
+Device = Literal["cpu", "cuda", "auto"]
 
 # https://github.com/OpenNMT/CTranslate2/blob/master/docs/quantization.md#quantize-on-model-conversion
-type Quantization = Literal[
+Quantization = Literal[
     "int8", "int8_float16", "int8_bfloat16", "int8_float32", "int16", "float16", "bfloat16", "float32", "default"
 ]
 
@@ -35,6 +35,26 @@ class WhisperConfig(BaseModel):
     use_batched_mode: bool = False
     """
     Whether to use batch mode(introduced in 1.1.0 `faster-whisper` release) for inference. This will likely become the default in the future and the configuration option will be removed.
+    """
+    max_concurrent_jobs: int = Field(default=4, ge=1, le=8)
+    """
+    Maximum number of concurrent transcription jobs that can run in parallel.
+    """
+    model_instances_per_model: int = Field(default=1, ge=1, le=8)
+    """
+    Number of model instances to keep loaded per model name for parallel processing.
+    Higher values allow more parallel inference but consume more memory.
+    """
+    enable_cpu_affinity: bool = Field(default=True)
+    """
+    Whether to enable CPU core affinity for model instances to improve parallel performance.
+    Each model instance will be bound to specific CPU cores when enabled.
+    """
+    use_process_pool: bool = Field(default=True)
+    """
+    Whether to use ProcessPoolExecutor instead of ThreadPoolExecutor for parallel processing.
+    ProcessPoolExecutor bypasses Python's GIL for true parallelism with ~50% better performance.
+    Requires more memory but provides better CPU utilization.
     """
 
 

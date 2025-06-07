@@ -24,6 +24,7 @@ from speaches.api_types import (
 )
 from speaches.dependencies import AudioFileDependency, ConfigDependency, WhisperModelManagerDependency
 from speaches.executors.whisper import utils as whisper_utils
+from speaches.executors.whisper.parallel_asr import ParallelWhisperASR
 from speaches.hf_utils import get_model_card_data_from_cached_repo_info, get_model_repo_path
 from speaches.model_aliases import ModelId
 from speaches.text_utils import segments_to_srt, segments_to_text, segments_to_vtt
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["automatic-speech-recognition"])
 
-type ResponseFormat = Literal["text", "json", "verbose_json", "srt", "vtt"]
+ResponseFormat = Literal["text", "json", "verbose_json", "srt", "vtt"]
 
 # https://platform.openai.com/docs/api-reference/audio/createTranscription#audio-createtranscription-response_format
 DEFAULT_RESPONSE_FORMAT: ResponseFormat = "json"
@@ -99,7 +100,7 @@ def segments_to_streaming_response(
     "/v1/audio/translations",
     response_model=str | CreateTranscriptionResponseJson | CreateTranscriptionResponseVerboseJson,
 )
-def translate_file(
+async def translate_file(
     config: ConfigDependency,
     model_manager: WhisperModelManagerDependency,
     audio: AudioFileDependency,
@@ -109,22 +110,30 @@ def translate_file(
     temperature: Annotated[float, Form()] = 0.0,
     stream: Annotated[bool, Form()] = False,
     vad_filter: Annotated[bool, Form()] = False,
+    use_parallel: Annotated[bool, Form()] = True,
 ) -> Response | StreamingResponse:
-    with model_manager.load_model(model) as whisper:
-        whisper_model = BatchedInferencePipeline(model=whisper) if config.whisper.use_batched_mode else whisper
-        segments, transcription_info = whisper_model.transcribe(
-            audio,
-            task="translate",
-            initial_prompt=prompt,
-            temperature=temperature,
-            vad_filter=vad_filter,
-        )
-        segments = TranscriptionSegment.from_faster_whisper_segments(segments)
+    # Create ASR executor
+    parallel_asr = ParallelWhisperASR(model_manager, use_batched_mode=config.whisper.use_batched_mode)
+    
+    # Transcription parameters for translation
+    transcribe_kwargs = {
+        "task": "translate",
+        "initial_prompt": prompt,
+        "temperature": temperature,
+        "vad_filter": vad_filter,
+    }
+    
+    if use_parallel and config.whisper.model_instances_per_model > 1:
+        # Use parallel processing
+        segments, transcription_info = await parallel_asr.transcribe_async(model, audio, **transcribe_kwargs)
+    else:
+        # Use legacy sync processing
+        segments, transcription_info = parallel_asr.transcribe_sync(model, audio, **transcribe_kwargs)
 
-        if stream:
-            return segments_to_streaming_response(segments, transcription_info, response_format)
-        else:
-            return segments_to_response(segments, transcription_info, response_format)
+    if stream:
+        return segments_to_streaming_response(segments, transcription_info, response_format)
+    else:
+        return segments_to_response(segments, transcription_info, response_format)
 
 
 # HACK: Since Form() doesn't support `alias`, we need to use a workaround.
@@ -145,7 +154,7 @@ async def get_timestamp_granularities(request: Request) -> TimestampGranularitie
     "/v1/audio/transcriptions",
     response_model=str | CreateTranscriptionResponseJson | CreateTranscriptionResponseVerboseJson,
 )
-def transcribe_file(
+async def transcribe_file(
     config: ConfigDependency,
     model_manager: WhisperModelManagerDependency,
     request: Request,
@@ -163,8 +172,9 @@ def transcribe_file(
     stream: Annotated[bool, Form()] = False,
     hotwords: Annotated[str | None, Form()] = None,
     vad_filter: Annotated[bool, Form()] = False,
+    use_parallel: Annotated[bool, Form()] = True,
 ) -> Response | StreamingResponse:
-    timestamp_granularities = asyncio.run(get_timestamp_granularities(request))
+    timestamp_granularities = await get_timestamp_granularities(request)
     if timestamp_granularities != DEFAULT_TIMESTAMP_GRANULARITIES and response_format != "verbose_json":
         logger.warning(
             "It only makes sense to provide `timestamp_granularities[]` when `response_format` is set to `verbose_json`. See https://platform.openai.com/docs/api-reference/audio/createTranscription#audio-createtranscription-timestamp_granularities."
@@ -180,24 +190,31 @@ def transcribe_file(
     model_card_data = get_model_card_data_from_cached_repo_info(cached_repo_info)
     assert model_card_data is not None, cached_repo_info  # FIXME
     if whisper_utils.hf_model_filter.passes_filter(model_card_data):
-        with model_manager.load_model(model) as whisper:
-            whisper_model = BatchedInferencePipeline(model=whisper) if config.whisper.use_batched_mode else whisper
-            segments, transcription_info = whisper_model.transcribe(
-                audio,
-                task="transcribe",
-                language=language,
-                initial_prompt=prompt,
-                word_timestamps="word" in timestamp_granularities,
-                temperature=temperature,
-                vad_filter=vad_filter,
-                hotwords=hotwords,
-            )
-            segments = TranscriptionSegment.from_faster_whisper_segments(segments)
+        # Create ASR executor
+        parallel_asr = ParallelWhisperASR(model_manager, use_batched_mode=config.whisper.use_batched_mode)
+        
+        # Transcription parameters
+        transcribe_kwargs = {
+            "task": "transcribe",
+            "language": language,
+            "initial_prompt": prompt,
+            "word_timestamps": "word" in timestamp_granularities,
+            "temperature": temperature,
+            "vad_filter": vad_filter,
+            "hotwords": hotwords,
+        }
+        
+        if use_parallel and config.whisper.model_instances_per_model > 1:
+            # Use parallel processing
+            segments, transcription_info = await parallel_asr.transcribe_async(model, audio, **transcribe_kwargs)
+        else:
+            # Use legacy sync processing
+            segments, transcription_info = parallel_asr.transcribe_sync(model, audio, **transcribe_kwargs)
 
-            if stream:
-                return segments_to_streaming_response(segments, transcription_info, response_format)
-            else:
-                return segments_to_response(segments, transcription_info, response_format)
+        if stream:
+            return segments_to_streaming_response(segments, transcription_info, response_format)
+        else:
+            return segments_to_response(segments, transcription_info, response_format)
     else:
         raise HTTPException(
             status_code=404,

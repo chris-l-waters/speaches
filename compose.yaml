@@ -10,6 +10,16 @@ services:
     restart: unless-stopped
     ports:
       - 8000:8000
+    environment:
+      - WHISPER__MODEL_INSTANCES_PER_MODEL=4
+      - WHISPER__MAX_CONCURRENT_JOBS=4
+      - WHISPER__ENABLE_CPU_AFFINITY=true
+      - WHISPER__USE_PROCESS_POOL=true
+      # Threading environment fixes
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMBA_NUM_THREADS=1
     develop:
       watch:
         - action: rebuild
